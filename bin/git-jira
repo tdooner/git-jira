@@ -1,0 +1,190 @@
+#!/usr/bin/env ruby
+require 'yaml'
+require 'tempfile'
+class StoryNotFound < StandardError; end
+
+command = ARGV.shift
+
+def commit_footer(story)
+  tag = case story['issuetype']
+        when 'Bug'
+          "[Fixes #{story['issue']}]"
+        else
+          "[Finishes #{story['issue']}]"
+        end
+  tag += ' -'
+  tag_indent = tag.length + 1
+  tag_line_length = tag.length
+
+  story['summary'].split(' ').each do |summary_word|
+    if (tag_line_length + summary_word.length) >= 72
+      tag += "\n#{' ' * tag_indent}#{summary_word}"
+      tag_line_length = tag_indent + summary_word.length + 1
+    else
+      tag += " #{summary_word}"
+      tag_line_length += summary_word.length + 1
+    end
+  end
+
+  tag
+end
+
+def load_story(story)
+  body = `jira view #{story} 2>&1`
+
+  if body =~ /404 Not Found/
+    raise StoryNotFound, "Story #{story} not found"
+  end
+
+  begin
+    YAML.load(body)
+  rescue Psych::SyntaxError
+    # go-jira's YAML is not quite equal to ruby's YAML - if the body of the
+    # description or comments fields has a "  foo:" line, then ruby won't be
+    # able to parse it
+    # HACK: replace those fields with a double-quoted value.
+    body = body.each_line.map do |line|
+      # if the line contains colons or brackets or quotes, escape them
+      match = line.match(/^([a-z]+): .*(: |[<>'"\[\]])/)
+      if match
+        "#{match[1]}: #{line[(match[1].length + 2)..-1].strip.inspect}"
+      else
+        line
+      end
+    end.join("\n")
+
+    return YAML.load(body)
+  end
+end
+
+def story_branches
+  `git branch`
+    .strip.each_line.map(&:split).map(&:last)
+    .delete_if { |b| !matches_story?(b) }
+    .map(&:downcase)
+end
+
+def matches_story?(string)
+  string =~ /[a-z]{2,3}-[0-9]+/i
+end
+
+def current_branch
+  `git rev-parse --abbrev-ref HEAD`.strip
+end
+
+def confirm?
+  $stdout.write 'Go? [y/N]: '
+  exit unless $stdin.gets.chomp =~ /y/i
+  $stdout.puts
+end
+
+def pick_story_of_mine
+  my_stories = `jira ls -q 'assignee = currentUser() AND (status = "To Do" OR status = Backlog OR status = "In Progress")'`.strip.split("\n")
+  branches = story_branches
+  my_stories = my_stories
+                 .map { |s| s.split(':', 2) }
+                 .find_all { |s| !branches.include?(s[0].downcase) }
+  puts "which story to start?"
+  my_stories.each_with_index do |story, i|
+    puts "#{i}: #{story.join(' ')}"
+  end
+  my_stories[gets.strip.to_i][0]
+end
+
+def time_ago_in_words(distance_in_seconds)
+  distance_in_minutes = (distance_in_seconds / 60.0).round
+  distance_in_hours = (distance_in_minutes / 60.0).round
+  distance_in_days = (distance_in_hours / 24.0).floor
+
+  case distance_in_seconds
+  when 0..60
+    'less than a minute ago'
+  when 60..2700
+    "about #{distance_in_minutes} minutes ago"
+  when 2700..86400
+    "about #{(distance_in_minutes / 60).round} hours ago"
+  else
+    "#{distance_in_days} days ago"
+  end
+end
+
+case command
+when 'start'
+  story_id = ARGV.shift || pick_story_of_mine
+  story = load_story(story_id)
+  puts "Starting story #{story_id}:"
+  puts "  summary:  #{story['summary']}"
+  puts "  reporter: #{story['reporter']}"
+  puts "  created:  #{time_ago_in_words(Time.now - story['created'])}"
+  puts
+
+  if story_branches.include?(story_id.downcase)
+    `git checkout #{story_id}`
+  else
+    `git checkout -b #{story_id} origin/master` unless current_branch == story_id
+  end
+
+  `jira start #{story_id}` unless story['status'] == 'In Progress'
+  `jira take #{story_id}` unless story['assignee'] == 'tom.dooner'
+when 'cleanup'
+  branches_to_remove = story_branches.find_all do |b|
+    begin
+      load_story(b)['status'] == 'Closed'
+    rescue StoryNotFound
+      # perhaps dangerous because of other branches in the format abc-123, but
+      # if a story has been deleted on JIRA then it won't be shown, and since we
+      # ask the user to confirm all removals, let's just assume that if the
+      # story doesn't exist on JIRA we should delete the branch
+      true
+    end
+  end
+
+  if branches_to_remove.none?
+    puts 'No branches to remove!'
+    exit
+  end
+
+  puts "Will remove branches: #{branches_to_remove.join(', ')}"
+  confirm?
+
+  `git checkout master` if branches_to_remove.include?(current_branch)
+  `git branch -D #{branches_to_remove.join(' ')}`
+when 'ci'
+  unless matches_story?(current_branch)
+    puts "You don't appear to be on a story branch!"
+    exit 1
+  end
+
+  story = load_story(current_branch)
+
+  if story['description']
+    Tempfile.open('git-j-commit-msg') do |f|
+      f.puts story['summary']
+      f.puts
+      f.puts story['description'].strip.gsub("\n\n", "\n") # TODO: <- normalize helper
+      f.puts
+      f.puts commit_footer(story)
+      f.close
+
+      system("git commit -v -t #{f.path}")
+    end
+  else
+    puts 'Failed to load description for story!'
+  end
+when 'ls'
+  branches = `git branch`.strip.each_line.map(&:split).map(&:last)
+  branches.delete_if { |b| !matches_story?(b) }
+  branches.map do |branch|
+    puts "#{branch.ljust(8)} - #{load_story(branch)['summary']}"
+  end
+when 'show'
+  branch = current_branch
+  if story_branches.include?(branch)
+    puts load_story(branch).inspect
+  else
+    echo 'Could not parse story branch!'
+  end
+else
+  puts 'unknown command!'
+  exit 1
+end
