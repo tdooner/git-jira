@@ -3,6 +3,15 @@ require 'yaml'
 require 'tempfile'
 class StoryNotFound < StandardError; end
 
+begin
+  config = YAML.load_file(File.expand_path('~/.jira.d/config.yml'))
+  config['user'] ||= ENV['USER']
+rescue
+  puts 'Could not load config file ~/.jira.d/config.yml'
+  puts 'Please make sure it is as described in these instructions:'
+  puts '  https://github.com/Netflix-Skunkworks/go-jira'
+end
+
 command = ARGV.shift
 
 def commit_footer(story)
@@ -125,7 +134,7 @@ when 'start'
   end
 
   `jira start #{story_id}` unless story['status'] == 'In Progress'
-  `jira take #{story_id}` unless story['assignee'] == 'tom.dooner'
+  `jira take #{story_id}` unless story['assignee'] == config['user']
 when 'cleanup'
   branches_to_remove = story_branches.find_all do |b|
     begin
