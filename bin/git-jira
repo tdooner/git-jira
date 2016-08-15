@@ -191,7 +191,7 @@ when 'show'
   if story_branches.include?(branch)
     puts load_story(branch).inspect
   else
-    echo 'Could not parse story branch!'
+    puts 'Could not parse story branch!'
   end
 else
   puts 'unknown command!'
