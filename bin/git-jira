@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 require 'yaml'
 require 'tempfile'
+require 'pp'
 class StoryNotFound < StandardError; end
 
 begin
@@ -10,6 +11,7 @@ rescue
   puts 'Could not load config file ~/.jira.d/config.yml'
   puts 'Please make sure it is as described in these instructions:'
   puts '  https://github.com/Netflix-Skunkworks/go-jira'
+  exit 1
 end
 
 command = ARGV.shift
@@ -124,7 +126,7 @@ when 'start'
   puts "Starting story #{story_id}:"
   puts "  summary:  #{story['summary']}"
   puts "  reporter: #{story['reporter']}"
-  puts "  created:  #{time_ago_in_words(Time.now - story['created'])}"
+  puts "  created:  #{story['created']}"
   puts
 
   if story_branches.include?(story_id.downcase)
@@ -159,12 +161,13 @@ when 'cleanup'
   `git checkout master` if branches_to_remove.include?(current_branch)
   `git branch -D #{branches_to_remove.join(' ')}`
 when 'ci'
-  unless matches_story?(current_branch)
+  story_name = ARGV.shift || current_branch
+  unless matches_story?(story_name)
     puts "You don't appear to be on a story branch!"
     exit 1
   end
 
-  story = load_story(current_branch)
+  story = load_story(story_name)
 
   if story['description']
     Tempfile.open('git-j-commit-msg') do |f|
@@ -187,9 +190,9 @@ when 'ls'
     puts "#{branch.ljust(8)} - #{load_story(branch)['summary']}"
   end
 when 'show'
-  branch = current_branch
+  branch = current_branch.downcase
   if story_branches.include?(branch)
-    puts load_story(branch).inspect
+    puts load_story(branch)
   else
     puts 'Could not parse story branch!'
   end
